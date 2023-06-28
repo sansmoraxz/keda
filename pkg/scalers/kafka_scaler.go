@@ -2,27 +2,30 @@ package scalers
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
+	"time"
 
-	"github.com/Shopify/sarama"
 	"github.com/go-logr/logr"
+	kedautil "github.com/kedacore/keda/v2/pkg/util"
+	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl"
+	"github.com/segmentio/kafka-go/sasl/plain"
+	"github.com/segmentio/kafka-go/sasl/scram"
 	v2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/metrics/pkg/apis/external_metrics"
-
-	kedautil "github.com/kedacore/keda/v2/pkg/util"
 )
 
 type kafkaScaler struct {
 	metricType      v2.MetricTargetType
 	metadata        kafkaMetadata
-	client          sarama.Client
-	admin           sarama.ClusterAdmin
+	client          *kafka.Client
+	transport       *kafka.Transport
 	logger          logr.Logger
-	previousOffsets map[string]map[int32]int64
+	previousOffsets map[string]map[int]int64
 }
 
 const (
@@ -33,14 +36,13 @@ const (
 type kafkaMetadata struct {
 	bootstrapServers       []string
 	group                  string
-	topic                  string
+	topic                  []string
 	partitionLimitation    []int32
 	lagThreshold           int64
 	activationLagThreshold int64
 	offsetResetPolicy      offsetResetPolicy
 	allowIdleConsumers     bool
 	excludePersistentLag   bool
-	version                sarama.KafkaVersion
 
 	// If an invalid offset is found, whether to scale to 1 (false - the default) so consumption can
 	// occur or scale to 0 (true). See discussion in https://github.com/kedacore/keda/issues/2612
@@ -108,16 +110,16 @@ func NewKafkaScaler(config *ScalerConfig) (Scaler, error) {
 		return nil, fmt.Errorf("error parsing kafka metadata: %w", err)
 	}
 
-	client, admin, err := getKafkaClients(kafkaMetadata)
+	client, transport, err := getKafkaClients(kafkaMetadata)
 	if err != nil {
 		return nil, err
 	}
 
-	previousOffsets := make(map[string]map[int32]int64)
+	previousOffsets := make(map[string]map[int]int64)
 
 	return &kafkaScaler{
 		client:          client,
-		admin:           admin,
+		transport:       transport,
 		metricType:      metricType,
 		metadata:        kafkaMetadata,
 		logger:          logger,
@@ -255,11 +257,11 @@ func parseKafkaMetadata(config *ScalerConfig, logger logr.Logger) (kafkaMetadata
 
 	switch {
 	case config.TriggerMetadata["topicFromEnv"] != "":
-		meta.topic = config.ResolvedEnv[config.TriggerMetadata["topicFromEnv"]]
+		meta.topic = strings.Split(config.ResolvedEnv[config.TriggerMetadata["topicFromEnv"]], ",")
 	case config.TriggerMetadata["topic"] != "":
-		meta.topic = config.TriggerMetadata["topic"]
+		meta.topic = strings.Split(config.TriggerMetadata["topic"], ",")
 	default:
-		meta.topic = ""
+		meta.topic = []string{}
 		logger.V(1).Info(fmt.Sprintf("consumer group %q has no topic specified, "+
 			"will use all topics subscribed by the consumer group for scaling", meta.group))
 	}
@@ -267,7 +269,7 @@ func parseKafkaMetadata(config *ScalerConfig, logger logr.Logger) (kafkaMetadata
 	meta.partitionLimitation = nil
 	partitionLimitationMetadata := strings.TrimSpace(config.TriggerMetadata["partitionLimitation"])
 	if partitionLimitationMetadata != "" {
-		if meta.topic == "" {
+		if meta.topic == nil || len(meta.topic) == 0 {
 			logger.V(1).Info("no specific topic set, ignoring partitionLimitation setting")
 		} else {
 			pattern := config.TriggerMetadata["partitionLimitation"]
@@ -347,123 +349,131 @@ func parseKafkaMetadata(config *ScalerConfig, logger logr.Logger) (kafkaMetadata
 		meta.scaleToZeroOnInvalidOffset = t
 	}
 
-	meta.version = sarama.V1_0_0_0
-	if val, ok := config.TriggerMetadata["version"]; ok {
-		val = strings.TrimSpace(val)
-		version, err := sarama.ParseKafkaVersion(val)
-		if err != nil {
-			return meta, fmt.Errorf("error parsing kafka version: %w", err)
-		}
-		meta.version = version
-	}
 	meta.scalerIndex = config.ScalerIndex
 	return meta, nil
 }
 
-func getKafkaClients(metadata kafkaMetadata) (sarama.Client, sarama.ClusterAdmin, error) {
-	config := sarama.NewConfig()
-	config.Version = metadata.version
+func getKafkaClients(metadata kafkaMetadata) (*kafka.Client, *kafka.Transport, error) {
+
+	var saslMechanism sasl.Mechanism = nil
+	var tlsConfig *tls.Config = nil
+	var err error
 
 	if metadata.saslType != KafkaSASLTypeNone {
-		config.Net.SASL.Enable = true
-		config.Net.SASL.User = metadata.username
-		config.Net.SASL.Password = metadata.password
+		saslMechanism = plain.Mechanism{
+			Username: metadata.username,
+			Password: metadata.password,
+		}
 	}
 
 	if metadata.enableTLS {
-		config.Net.TLS.Enable = true
-		tlsConfig, err := kedautil.NewTLSConfigWithPassword(metadata.cert, metadata.key, metadata.keyPassword, metadata.ca, false)
+		tlsConfig, err = kedautil.NewTLSConfigWithPassword(metadata.cert, metadata.key, metadata.keyPassword, metadata.ca, false)
 		if err != nil {
 			return nil, nil, err
 		}
-		config.Net.TLS.Config = tlsConfig
 	}
 
 	if metadata.saslType == KafkaSASLTypePlaintext {
-		config.Net.SASL.Mechanism = sarama.SASLTypePlaintext
+		saslMechanism = plain.Mechanism{
+			Username: metadata.username,
+			Password: metadata.password,
+		}
 	}
 
 	if metadata.saslType == KafkaSASLTypeSCRAMSHA256 {
-		config.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA256} }
-		config.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA256
+		saslMechanism, err = scram.Mechanism(scram.SHA256, metadata.username, metadata.password)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	if metadata.saslType == KafkaSASLTypeSCRAMSHA512 {
-		config.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA512} }
-		config.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA512
+		saslMechanism, err = scram.Mechanism(scram.SHA512, metadata.username, metadata.password)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	if metadata.saslType == KafkaSASLTypeOAuthbearer {
-		config.Net.SASL.Mechanism = sarama.SASLTypeOAuth
-		config.Net.SASL.TokenProvider = OAuthBearerTokenProvider(metadata.username, metadata.password, metadata.oauthTokenEndpointURI, metadata.scopes, metadata.oauthExtensions)
+		// TODO: implement
+		return nil, nil, fmt.Errorf("SASL/OAUTHBEARER is not implemented yet")
 	}
 
-	client, err := sarama.NewClient(metadata.bootstrapServers, config)
+	transport := &kafka.Transport{
+		TLS:  tlsConfig,
+		SASL: saslMechanism,
+	}
+	client := kafka.Client{
+		Addr:      kafka.TCP(metadata.bootstrapServers...),
+		Transport: transport,
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("error creating kafka client: %w", err)
 	}
 
-	admin, err := sarama.NewClusterAdminFromClient(client)
-	if err != nil {
-		if !client.Closed() {
-			client.Close()
-		}
-		return nil, nil, fmt.Errorf("error creating kafka admin: %w", err)
-	}
-
-	return client, admin, nil
+	return &client, transport, nil
 }
 
-func (s *kafkaScaler) getTopicPartitions() (map[string][]int32, error) {
-	var topicsToDescribe = make([]string, 0)
-
-	// when no topic is specified, query to cg group to fetch all subscribed topics
-	if s.metadata.topic == "" {
-		listCGOffsetResponse, err := s.admin.ListConsumerGroupOffsets(s.metadata.group, nil)
-		if err != nil {
-			return nil, fmt.Errorf("error listing cg offset: %w", err)
+func (s *kafkaScaler) listSubscribedTopics(resp *kafka.DescribeGroupsResponse) []string {
+	var _topics []string
+	for _, group := range resp.Groups {
+		for _, member := range group.Members {
+			_topics = append(_topics, member.MemberMetadata.Topics...)
 		}
+	}
+	return _topics
+}
 
-		if listCGOffsetResponse.Err > 0 {
-			errMsg := fmt.Errorf("error listing cg offset: %w", listCGOffsetResponse.Err)
-			s.logger.Error(errMsg, "")
+func (s *kafkaScaler) getTopicPartitions() (map[string][]int, error) {
+
+	dialer := &kafka.Dialer{
+		Timeout:       10 * time.Second,
+		DualStack:     true,
+		SASLMechanism: s.transport.SASL,
+		TLS:           s.transport.TLS,
+	}
+
+	conn, err := dialer.Dial("tcp", s.metadata.bootstrapServers[0])
+
+	if err != nil {
+		return nil, fmt.Errorf("error dialing to kafka: %w", err)
+	}
+	defer func(conn *kafka.Conn) {
+		if err := conn.Close(); err != nil {
+			s.logger.Error(err, "error closing dialed connection %s", conn.RemoteAddr())
 		}
+	}(conn)
 
-		for topicName := range listCGOffsetResponse.Blocks {
-			topicsToDescribe = append(topicsToDescribe, topicName)
+	var partitions []kafka.Partition
+
+	var _topics []string
+
+	if s.metadata.topic == nil || len(s.metadata.topic) == 0 {
+		// when no topic is specified, fetch all _topics the consumer group is subscribed to
+		describeResp, err := s.client.DescribeGroups(context.Background(), &kafka.DescribeGroupsRequest{
+			GroupIDs: []string{s.metadata.group},
+		})
+		if err != nil || len(describeResp.Groups) == 0 || len(describeResp.Groups[0].Members) == 0 {
+			// fallback to listing all _topics
+			_topics = []string{}
+		} else {
+			_topics = s.listSubscribedTopics(describeResp)
 		}
 	} else {
-		topicsToDescribe = []string{s.metadata.topic}
+		// when topic is specified, use that
+		_topics = s.metadata.topic
 	}
-
-	topicsMetadata, err := s.admin.DescribeTopics(topicsToDescribe)
+	partitions, err = conn.ReadPartitions(_topics...)
 	if err != nil {
-		return nil, fmt.Errorf("error describing topics: %w", err)
+		return nil, fmt.Errorf("error reading partitions for topic %s: %w", s.metadata.topic, err)
 	}
 
-	if s.metadata.topic != "" && len(topicsMetadata) != 1 {
-		return nil, fmt.Errorf("expected only 1 topic metadata, got %d", len(topicsMetadata))
+	// collect topic names
+	topicPartitions := make(map[string][]int)
+	for _, partition := range partitions {
+		topicPartitions[partition.Topic] = append(topicPartitions[partition.Topic], partition.ID)
 	}
 
-	topicPartitions := make(map[string][]int32, len(topicsMetadata))
-	for _, topicMetadata := range topicsMetadata {
-		if topicMetadata.Err > 0 {
-			errMsg := fmt.Errorf("error describing topics: %w", topicMetadata.Err)
-			s.logger.Error(errMsg, "")
-		}
-		partitionMetadata := topicMetadata.Partitions
-		var partitions []int32
-		for _, p := range partitionMetadata {
-			if s.isActivePartition(p.ID) {
-				partitions = append(partitions, p.ID)
-			}
-		}
-		if len(partitions) == 0 {
-			return nil, fmt.Errorf("expected at least one active partition within the topic '%s'", topicMetadata.Name)
-		}
-
-		topicPartitions[topicMetadata.Name] = partitions
-	}
 	return topicPartitions, nil
 }
 
@@ -479,35 +489,43 @@ func (s *kafkaScaler) isActivePartition(pID int32) bool {
 	return false
 }
 
-func (s *kafkaScaler) getConsumerOffsets(topicPartitions map[string][]int32) (*sarama.OffsetFetchResponse, error) {
-	offsets, err := s.admin.ListConsumerGroupOffsets(s.metadata.group, topicPartitions)
-	if err != nil {
-		return nil, fmt.Errorf("error listing consumer group offsets: %w", err)
+func (s *kafkaScaler) getConsumerOffsets(topicPartitions map[string][]int) (map[string]map[int]int64, error) {
+	response, err := s.client.OffsetFetch(
+		context.Background(),
+		&kafka.OffsetFetchRequest{
+			GroupID: s.metadata.group,
+			Topics:  topicPartitions,
+		},
+	)
+	if err != nil || response.Error != nil {
+		return nil, fmt.Errorf("error listing consumer group offset: %w", err)
 	}
-	if offsets.Err > 0 {
-		errMsg := fmt.Errorf("error listing consumer group offsets: %w", offsets.Err)
-		s.logger.Error(errMsg, "")
+	consumerOffset := make(map[string]map[int]int64)
+	for topic, partitionsOffset := range response.Topics {
+		consumerOffset[topic] = make(map[int]int64)
+		for _, partition := range partitionsOffset {
+			consumerOffset[topic][partition.Partition] = partition.CommittedOffset
+		}
 	}
-	return offsets, nil
+	return consumerOffset, nil
 }
 
-// getLagForPartition returns (lag, lagWithPersistent, error)
-// When excludePersistentLag is set to `false` (default), lag will always be equal to lagWithPersistent
-// When excludePersistentLag is set to `true`, if partition is deemed to have persistent lag, lag will be set to 0 and lagWithPersistent will be latestOffset - consumerOffset
-// These return values will allow proper scaling from 0 -> 1 replicas by the IsActive func.
-func (s *kafkaScaler) getLagForPartition(topic string, partitionID int32, offsets *sarama.OffsetFetchResponse, topicPartitionOffsets map[string]map[int32]int64) (int64, int64, error) {
-	block := offsets.GetBlock(topic, partitionID)
-	if block == nil {
-		errMsg := fmt.Errorf("error finding offset block for topic %s and partition %d from offset block: %v", topic, partitionID, offsets.Blocks)
-		s.logger.Error(errMsg, "")
-		return 0, 0, errMsg
+/*
+getLagForPartition returns (lag, lagWithPersistent, error)
+
+When excludePersistentLag is set to `false` (default), lag will always be equal to lagWithPersistent
+When excludePersistentLag is set to `true`, if partition is deemed to have persistent lag, lag will be set to 0 and lagWithPersistent will be latestOffset - consumerOffset
+These return values will allow proper scaling from 0 -> 1 replicas by the IsActive func.
+*/
+func (s *kafkaScaler) getLagForPartition(topic string, partitionID int, consumerOffsets map[string]map[int]int64, producerOffsets map[string]map[int]int64) (int64, int64, error) {
+	if consumerOffsets == nil || len(consumerOffsets) == 0 {
+		return 0, 0, fmt.Errorf("consumerOffsets is empty")
 	}
-	if block.Err > 0 {
-		errMsg := fmt.Errorf("error finding offset block for topic %s and partition %d: %w", topic, partitionID, offsets.Err)
-		s.logger.Error(errMsg, "")
+	if producerOffsets == nil || len(producerOffsets) == 0 {
+		return 0, 0, fmt.Errorf("producerOffsets is empty")
 	}
 
-	consumerOffset := block.Offset
+	consumerOffset := consumerOffsets[topic][partitionID]
 	if consumerOffset == invalidOffset && s.metadata.offsetResetPolicy == latest {
 		retVal := int64(1)
 		if s.metadata.scaleToZeroOnInvalidOffset {
@@ -520,12 +538,12 @@ func (s *kafkaScaler) getLagForPartition(topic string, partitionID int32, offset
 		return retVal, retVal, nil
 	}
 
-	if _, found := topicPartitionOffsets[topic]; !found {
+	if _, found := producerOffsets[topic]; !found {
 		return 0, 0, fmt.Errorf("error finding partition offset for topic %s", topic)
 	}
-	latestOffset := topicPartitionOffsets[topic][partitionID]
+	producerOffset := producerOffsets[topic][partitionID]
 	if consumerOffset == invalidOffset && s.metadata.offsetResetPolicy == earliest {
-		return latestOffset, latestOffset, nil
+		return producerOffset, producerOffset, nil
 	}
 
 	// This code block tries to prevent KEDA Kafka trigger from scaling the scale target based on erroneous events
@@ -535,36 +553,40 @@ func (s *kafkaScaler) getLagForPartition(topic string, partitionID int32, offset
 			// No record of previous offset, so store current consumer offset
 			// Allow this consumer lag to be considered in scaling
 			if _, topicFound := s.previousOffsets[topic]; !topicFound {
-				s.previousOffsets[topic] = map[int32]int64{partitionID: consumerOffset}
+				s.previousOffsets[topic] = map[int]int64{partitionID: consumerOffset}
 			} else {
 				s.previousOffsets[topic][partitionID] = consumerOffset
 			}
 		case previousOffset == consumerOffset:
 			// Indicates consumer is still on the same offset as the previous polling cycle, there may be some issue with consuming this offset.
 			// return 0, so this consumer lag is not considered for scaling
-			return 0, latestOffset - consumerOffset, nil
+			return 0, producerOffset - consumerOffset, nil
 		default:
 			// Successfully Consumed some messages, proceed to change the previous offset
 			s.previousOffsets[topic][partitionID] = consumerOffset
 		}
 	}
 
-	return latestOffset - consumerOffset, latestOffset - consumerOffset, nil
+	return producerOffset - consumerOffset, producerOffset - consumerOffset, nil
 }
 
-// Close closes the kafka admin and client
+// Close closes the kafka client
 func (s *kafkaScaler) Close(context.Context) error {
-	// underlying client will also be closed on admin's Close() call
-	if s.admin == nil {
+	if s.client == nil {
 		return nil
 	}
-	return s.admin.Close()
+	if s.transport != nil {
+		s.transport.CloseIdleConnections()
+	}
+	//s.client = nil
+	//s.transport = nil
+	return nil
 }
 
 func (s *kafkaScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 	var metricName string
-	if s.metadata.topic != "" {
-		metricName = fmt.Sprintf("kafka-%s", s.metadata.topic)
+	if s.metadata.topic != nil && len(s.metadata.topic) > 0 {
+		metricName = fmt.Sprintf("kafka-%s", strings.Join(s.metadata.topic, ","))
 	} else {
 		metricName = fmt.Sprintf("kafka-%s-topics", s.metadata.group)
 	}
@@ -580,16 +602,17 @@ func (s *kafkaScaler) GetMetricSpecForScaling(context.Context) []v2.MetricSpec {
 }
 
 type consumerOffsetResult struct {
-	consumerOffsets *sarama.OffsetFetchResponse
+	consumerOffsets map[string]map[int]int64
 	err             error
 }
 
 type producerOffsetResult struct {
-	producerOffsets map[string]map[int32]int64
+	producerOffsets map[string]map[int]int64
 	err             error
 }
 
-func (s *kafkaScaler) getConsumerAndProducerOffsets(topicPartitions map[string][]int32) (*sarama.OffsetFetchResponse, map[string]map[int32]int64, error) {
+// getConsumerAndProducerOffsets returns (consumerOffsets, producerOffsets, error)
+func (s *kafkaScaler) getConsumerAndProducerOffsets(topicPartitions map[string][]int) (map[string]map[int]int64, map[string]map[int]int64, error) {
 	consumerChan := make(chan consumerOffsetResult, 1)
 	go func() {
 		consumerOffsets, err := s.getConsumerOffsets(topicPartitions)
@@ -666,68 +689,33 @@ func (s *kafkaScaler) getTotalLag() (int64, int64, error) {
 	return totalLag, totalLagWithPersistent, nil
 }
 
-type brokerOffsetResult struct {
-	offsetResp *sarama.OffsetResponse
-	err        error
-}
-
-func (s *kafkaScaler) getProducerOffsets(topicPartitions map[string][]int32) (map[string]map[int32]int64, error) {
-	version := int16(0)
-	if s.client.Config().Version.IsAtLeast(sarama.V0_10_1_0) {
-		version = 1
-	}
-
-	// Step 1: build one OffsetRequest instance per broker.
-	requests := make(map[*sarama.Broker]*sarama.OffsetRequest)
+// getProducerOffsets returns the latest offsets for the given topic partitions
+func (s *kafkaScaler) getProducerOffsets(topicPartitions map[string][]int) (map[string]map[int]int64, error) {
+	// Step 1: build one OffsetRequest
+	offsetRequest := make(map[string][]kafka.OffsetRequest)
 
 	for topic, partitions := range topicPartitions {
 		for _, partitionID := range partitions {
-			broker, err := s.client.Leader(topic, partitionID)
-			if err != nil {
-				return nil, err
-			}
-			request, ok := requests[broker]
-			if !ok {
-				request = &sarama.OffsetRequest{Version: version}
-				requests[broker] = request
-			}
-			request.AddBlock(topic, partitionID, sarama.OffsetNewest, 1)
+			offsetRequest[topic] = append(offsetRequest[topic], kafka.FirstOffsetOf(partitionID), kafka.LastOffsetOf(partitionID))
 		}
 	}
 
-	// Step 2: send requests, one per broker, and collect topicPartitionsOffsets
-	resultCh := make(chan brokerOffsetResult, len(requests))
-	var wg sync.WaitGroup
-	wg.Add(len(requests))
-	for broker, request := range requests {
-		go func(brCopy *sarama.Broker, reqCopy *sarama.OffsetRequest) {
-			defer wg.Done()
-			response, err := brCopy.GetAvailableOffsets(reqCopy)
-			resultCh <- brokerOffsetResult{response, err}
-		}(broker, request)
+	// Step 2: send request
+	res, err := s.client.ListOffsets(context.Background(), &kafka.ListOffsetsRequest{
+		Topics: offsetRequest,
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	wg.Wait()
-	close(resultCh)
-
-	topicPartitionsOffsets := make(map[string]map[int32]int64)
-	for brokerOffsetRes := range resultCh {
-		if brokerOffsetRes.err != nil {
-			return nil, brokerOffsetRes.err
-		}
-
-		for topic, blocks := range brokerOffsetRes.offsetResp.Blocks {
-			if _, found := topicPartitionsOffsets[topic]; !found {
-				topicPartitionsOffsets[topic] = make(map[int32]int64)
-			}
-			for partitionID, block := range blocks {
-				if block.Err != sarama.ErrNoError {
-					return nil, block.Err
-				}
-				topicPartitionsOffsets[topic][partitionID] = block.Offset
-			}
+	// Step 3: parse response and return
+	producerOffsets := make(map[string]map[int]int64)
+	for topic, partitionOffset := range res.Topics {
+		producerOffsets[topic] = make(map[int]int64)
+		for _, partition := range partitionOffset {
+			producerOffsets[topic][partition.Partition] = partition.LastOffset
 		}
 	}
 
-	return topicPartitionsOffsets, nil
+	return producerOffsets, nil
 }
