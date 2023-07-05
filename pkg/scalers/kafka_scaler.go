@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-logr/logr"
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
@@ -36,7 +35,7 @@ const (
 type kafkaMetadata struct {
 	bootstrapServers       []string
 	group                  string
-	topic                  []string
+	topic                 []string
 	partitionLimitation    []int32
 	lagThreshold           int64
 	activationLagThreshold int64
@@ -258,11 +257,11 @@ func parseKafkaMetadata(config *ScalerConfig, logger logr.Logger) (kafkaMetadata
 	switch {
 	case config.TriggerMetadata["topicFromEnv"] != "":
 		meta.topic = strings.Split(config.ResolvedEnv[config.TriggerMetadata["topicFromEnv"]], ",")
-	case config.TriggerMetadata["topic"] != "":
-		meta.topic = strings.Split(config.TriggerMetadata["topic"], ",")
+	case config.TriggerMetadata["topics"] != "":
+		meta.topic = strings.Split(config.TriggerMetadata["topics"], ",")
 	default:
 		meta.topic = []string{}
-		logger.V(1).Info(fmt.Sprintf("consumer group %q has no topic specified, "+
+		logger.V(1).Info(fmt.Sprintf("consumer group %q has no topics specified, "+
 			"will use all topics subscribed by the consumer group for scaling", meta.group))
 	}
 
@@ -270,7 +269,7 @@ func parseKafkaMetadata(config *ScalerConfig, logger logr.Logger) (kafkaMetadata
 	partitionLimitationMetadata := strings.TrimSpace(config.TriggerMetadata["partitionLimitation"])
 	if partitionLimitationMetadata != "" {
 		if meta.topic == nil || len(meta.topic) == 0 {
-			logger.V(1).Info("no specific topic set, ignoring partitionLimitation setting")
+			logger.V(1).Info("no specific topics set, ignoring partitionLimitation setting")
 		} else {
 			pattern := config.TriggerMetadata["partitionLimitation"]
 			parsed, err := kedautil.ParseInt32List(pattern)
@@ -426,55 +425,45 @@ func (s *kafkaScaler) listSubscribedTopics(resp *kafka.DescribeGroupsResponse) [
 
 func (s *kafkaScaler) getTopicPartitions() (map[string][]int, error) {
 
-	dialer := &kafka.Dialer{
-		Timeout:       10 * time.Second,
-		DualStack:     true,
-		SASLMechanism: s.transport.SASL,
-		TLS:           s.transport.TLS,
-	}
-
-	conn, err := dialer.Dial("tcp", s.metadata.bootstrapServers[0])
-
+	metadata, err := s.client.Metadata(context.Background(), &kafka.MetadataRequest{
+		Addr: s.client.Addr,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("error dialing to kafka: %w", err)
+		return nil, fmt.Errorf("error listing topics: %w", err)
 	}
-	defer func(conn *kafka.Conn) {
-		if err := conn.Close(); err != nil {
-			s.logger.Error(err, "error closing dialed connection %s", conn.RemoteAddr())
-		}
-	}(conn)
-
-	var partitions []kafka.Partition
-
-	var _topics []string
-
-	if s.metadata.topic == nil || len(s.metadata.topic) == 0 {
-		// when no topic is specified, fetch all _topics the consumer group is subscribed to
-		describeResp, err := s.client.DescribeGroups(context.Background(), &kafka.DescribeGroupsRequest{
-			GroupIDs: []string{s.metadata.group},
-		})
-		if err != nil || len(describeResp.Groups) == 0 || len(describeResp.Groups[0].Members) == 0 {
-			// fallback to listing all _topics
-			_topics = []string{}
-		} else {
-			_topics = s.listSubscribedTopics(describeResp)
-		}
-	} else {
-		// when topic is specified, use that
-		_topics = s.metadata.topic
+	describeGrpReq := &kafka.DescribeGroupsRequest{
+		Addr: s.client.Addr,
+		GroupIDs: []string{
+			s.metadata.group,
+		},
 	}
-	partitions, err = conn.ReadPartitions(_topics...)
+	describeGrp, err := s.client.DescribeGroups(context.Background(), describeGrpReq)
 	if err != nil {
-		return nil, fmt.Errorf("error reading partitions for topic %s: %w", s.metadata.topic, err)
+		return nil, fmt.Errorf("error describing group: %w", err)
 	}
-
-	// collect topic names
-	topicPartitions := make(map[string][]int)
-	for _, partition := range partitions {
-		topicPartitions[partition.Topic] = append(topicPartitions[partition.Topic], partition.ID)
+	s.logger.V(4).Info(fmt.Sprintf("Described group %s with response %v", s.metadata.group, describeGrp))
+	topics := metadata.Topics
+	result := make(map[string][]int)
+	for _, topic := range topics {
+		// skip internal topics
+		// if no topics are specified, all topics are considered
+		// otherwise, only the specified topics are considered
+		if topic.Internal {
+			continue
+		}
+		if len(s.metadata.topic) == 0 || kedautil.Contains(s.metadata.topic, topic.Name) {
+			partitions := make([]int, 0)
+			for _, partition := range topic.Partitions {
+				if (len(s.metadata.partitionLimitation) == 0) ||
+					(len(s.metadata.partitionLimitation) > 0 && kedautil.Contains(s.metadata.partitionLimitation, int32(partition.ID))) {
+					partitions = append(partitions, partition.ID)
+				}
+			}
+			result[topic.Name] = partitions
+		}
 	}
-
-	return topicPartitions, nil
+	s.logger.V(1).Info(fmt.Sprintf("Found topic partitions %v", result))
+	return result, nil
 }
 
 func (s *kafkaScaler) isActivePartition(pID int32) bool {
@@ -567,6 +556,9 @@ func (s *kafkaScaler) getLagForPartition(topic string, partitionID int, consumer
 		}
 	}
 
+	s.logger.V(1).Info(fmt.Sprintf("Consumer offset for topic %s in group %s and partition %d is %d", topic, s.metadata.group, partitionID, consumerOffset))
+	s.logger.V(1).Info(fmt.Sprintf("Producer offset for topic %s in group %s and partition %d is %d", topic, s.metadata.group, partitionID, producerOffset))
+
 	return producerOffset - consumerOffset, producerOffset - consumerOffset, nil
 }
 
@@ -649,6 +641,10 @@ func (s *kafkaScaler) GetMetricsAndActivity(_ context.Context, metricName string
 	return []external_metrics.ExternalMetricValue{metric}, totalLagWithPersistent > s.metadata.activationLagThreshold, nil
 }
 
+func (s *kafkaScaler) TotalLag() (int64, int64, error) {
+	return s.getTotalLag()
+}
+
 // getTotalLag returns totalLag, totalLagWithPersistent, error
 // totalLag and totalLagWithPersistent are the summations of lag and lagWithPersistent returned by getLagForPartition function respectively.
 // totalLag maybe less than totalLagWithPersistent when excludePersistentLag is set to `true` due to some partitions deemed as having persistent lag
@@ -657,8 +653,10 @@ func (s *kafkaScaler) getTotalLag() (int64, int64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
+	s.logger.V(1).Info(fmt.Sprintf("Kafka scaler: Topic partitions %v", topicPartitions))
 
 	consumerOffsets, producerOffsets, err := s.getConsumerAndProducerOffsets(topicPartitions)
+	s.logger.V(1).Info(fmt.Sprintf("Kafka scaler: Consumer offsets %v, producer offsets %v", consumerOffsets, producerOffsets))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -678,7 +676,9 @@ func (s *kafkaScaler) getTotalLag() (int64, int64, error) {
 		}
 		totalTopicPartitions += (int64)(len(partitionsOffsets))
 	}
-	s.logger.V(1).Info(fmt.Sprintf("Kafka scaler: Providing metrics based on totalLag %v, topicPartitions %v, threshold %v", totalLag, len(topicPartitions), s.metadata.lagThreshold))
+	s.logger.V(1).Info(fmt.Sprintf("Kafka scaler: Providing metrics based on totalLag %v, topicPartitions %v, threshold %v", totalLag, topicPartitions, s.metadata.lagThreshold))
+
+	s.logger.V(1).Info(fmt.Sprintf("Kafka scaler: Consumer offsets %v, producer offsets %v", consumerOffsets, producerOffsets))
 
 	if !s.metadata.allowIdleConsumers {
 		// don't scale out beyond the number of topicPartitions
@@ -702,6 +702,7 @@ func (s *kafkaScaler) getProducerOffsets(topicPartitions map[string][]int) (map[
 
 	// Step 2: send request
 	res, err := s.client.ListOffsets(context.Background(), &kafka.ListOffsetsRequest{
+		Addr:   s.client.Addr,
 		Topics: offsetRequest,
 	})
 	if err != nil {
