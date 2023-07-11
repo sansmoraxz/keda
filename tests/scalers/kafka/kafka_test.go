@@ -376,7 +376,9 @@ func testEarliestPolicy(t *testing.T, kc *kubernetes.Clientset, data templateDat
 	data.TopicName = topic1
 	data.ResetPolicy = "earliest"
 	KubectlApplyWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
 	KubectlApplyWithTemplate(t, data, "singleScaledObjectTemplate", singleScaledObjectTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "singleScaledObjectTemplate", singleScaledObjectTemplate)
 
 	// Shouldn't scale pods applying earliest policy
 	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, testNamespace, 0, 30)
@@ -399,8 +401,6 @@ func testEarliestPolicy(t *testing.T, kc *kubernetes.Clientset, data templateDat
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, topicPartitions, 60, 2),
 		"replica count should be %d after 2 minute", messages)
 
-	KubectlDeleteWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
-	KubectlDeleteWithTemplate(t, data, "singleScaledObjectTemplate", singleScaledObjectTemplate)
 }
 
 func testLatestPolicy(t *testing.T, kc *kubernetes.Clientset, data templateData) {
@@ -411,7 +411,9 @@ func testLatestPolicy(t *testing.T, kc *kubernetes.Clientset, data templateData)
 	data.TopicName = topic1
 	data.ResetPolicy = "latest"
 	KubectlApplyWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
 	KubectlApplyWithTemplate(t, data, "singleScaledObjectTemplate", singleScaledObjectTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "singleScaledObjectTemplate", singleScaledObjectTemplate)
 
 	// Shouldn't scale pods
 	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, testNamespace, 0, 30)
@@ -433,9 +435,6 @@ func testLatestPolicy(t *testing.T, kc *kubernetes.Clientset, data templateData)
 
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, topicPartitions, 60, 2),
 		"replica count should be %d after 2 minute", messages)
-
-	KubectlDeleteWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
-	KubectlDeleteWithTemplate(t, data, "singleScaledObjectTemplate", singleScaledObjectTemplate)
 }
 
 func testMultiTopic(t *testing.T, kc *kubernetes.Clientset, data templateData) {
@@ -444,7 +443,9 @@ func testMultiTopic(t *testing.T, kc *kubernetes.Clientset, data templateData) {
 	commitPartition(t, topic2, "multiTopic")
 	data.TopicName = fmt.Sprintf("%s,%s", topic1, topic2)
 	KubectlApplyWithTemplate(t, data, "multiDeploymentTemplate", multiDeploymentTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "multiDeploymentTemplate", multiDeploymentTemplate)
 	KubectlApplyWithTemplate(t, data, "multiScaledObjectTemplate", multiScaledObjectTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "multiScaledObjectTemplate", multiScaledObjectTemplate)
 
 	// Shouldn't scale pods
 	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, testNamespace, 0, 30)
@@ -463,9 +464,6 @@ func testMultiTopic(t *testing.T, kc *kubernetes.Clientset, data templateData) {
 	publishMessage(t, topic2)
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, 2, 60, 2),
 		"replica count should be %d after 2 minute", 2)
-
-	KubectlDeleteWithTemplate(t, data, "multiDeploymentTemplate", multiDeploymentTemplate)
-	KubectlDeleteWithTemplate(t, data, "multiScaledObjectTemplate", multiScaledObjectTemplate)
 }
 
 func testZeroOnInvalidOffset(t *testing.T, kc *kubernetes.Clientset, data templateData) {
@@ -476,13 +474,12 @@ func testZeroOnInvalidOffset(t *testing.T, kc *kubernetes.Clientset, data templa
 	data.ResetPolicy = invalidOffsetGroup
 	data.ScaleToZeroOnInvalid = StringTrue
 	KubectlApplyWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
 	KubectlApplyWithTemplate(t, data, "invalidOffsetScaledObjectTemplate", invalidOffsetScaledObjectTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "invalidOffsetScaledObjectTemplate", invalidOffsetScaledObjectTemplate)
 
 	// Shouldn't scale pods
 	AssertReplicaCountNotChangeDuringTimePeriod(t, kc, deploymentName, testNamespace, 0, 30)
-
-	KubectlDeleteWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
-	KubectlDeleteWithTemplate(t, data, "invalidOffsetScaledObjectTemplate", invalidOffsetScaledObjectTemplate)
 }
 
 func testOneOnInvalidOffset(t *testing.T, kc *kubernetes.Clientset, data templateData) {
@@ -493,7 +490,9 @@ func testOneOnInvalidOffset(t *testing.T, kc *kubernetes.Clientset, data templat
 	data.ResetPolicy = invalidOffsetGroup
 	data.ScaleToZeroOnInvalid = StringFalse
 	KubectlApplyWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
 	KubectlApplyWithTemplate(t, data, "invalidOffsetScaledObjectTemplate", invalidOffsetScaledObjectTemplate)
+	defer KubectlDeleteWithTemplate(t, data, "invalidOffsetScaledObjectTemplate", invalidOffsetScaledObjectTemplate)
 
 	// Should scale to 1
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, 1, 60, 2),
@@ -505,9 +504,6 @@ func testOneOnInvalidOffset(t *testing.T, kc *kubernetes.Clientset, data templat
 	// Should scale to 0
 	assert.True(t, WaitForDeploymentReplicaReadyCount(t, kc, deploymentName, testNamespace, 0, 60, 10),
 		"replica count should be %d after 10 minute", 0)
-
-	KubectlDeleteWithTemplate(t, data, "singleDeploymentTemplate", singleDeploymentTemplate)
-	KubectlDeleteWithTemplate(t, data, "invalidOffsetScaledObjectTemplate", invalidOffsetScaledObjectTemplate)
 }
 
 func publishMessage(t *testing.T, topic string) {
