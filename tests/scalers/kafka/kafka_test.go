@@ -5,6 +5,7 @@ package kafka_test
 
 import (
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/joho/godotenv"
@@ -28,7 +29,7 @@ var (
 	kafkaClientName              = fmt.Sprintf("%s-client", testName)
 	scaledObjectName             = fmt.Sprintf("%s-so", testName)
 	bootstrapServer              = fmt.Sprintf("%s-kafka-bootstrap.%s:9092", kafkaName, testNamespace)
-	strimziOperatorVersion       = "0.30.0"
+	strimziOperatorVersion       = "0.35.0"
 	topic1                       = "kafka-topic"
 	topic2                       = "kafka-topic2"
 	zeroInvalidOffsetTopic       = "kafka-topic-zero-invalid-offset"
@@ -284,7 +285,7 @@ metadata:
   namespace: {{.TestNamespace}}
 spec:
   kafka:
-    version: "3.1.0"
+    version: "3.4.0"
     replicas: 1
     listeners:
       - name: plain
@@ -566,6 +567,7 @@ func testPersistentLag(t *testing.T, kc *kubernetes.Clientset, data templateData
 }
 
 func installKafkaOperator(t *testing.T) {
+	t.Log("--- installing kafka operator ---")
 	_, err := ExecuteCommand("helm repo add strimzi https://strimzi.io/charts/")
 	assert.NoErrorf(t, err, "cannot execute command - %s", err)
 	_, err = ExecuteCommand("helm repo update")
@@ -575,6 +577,7 @@ func installKafkaOperator(t *testing.T) {
 		testName,
 		strimziOperatorVersion))
 	assert.NoErrorf(t, err, "cannot execute command - %s", err)
+	t.Log("--- kafka operator installed ---")
 }
 
 func uninstallKafkaOperator(t *testing.T) {
@@ -585,17 +588,21 @@ func uninstallKafkaOperator(t *testing.T) {
 }
 
 func addTopic(t *testing.T, data templateData, name string, partitions int) {
+	t.Log("--- adding kafka topic" + name + " and partitions " + strconv.Itoa(partitions) + " ---")
 	data.KafkaTopicName = name
 	data.KafkaTopicPartitions = partitions
 	KubectlApplyWithTemplate(t, data, "kafkaTopicTemplate", kafkaTopicTemplate)
 	_, err := ExecuteCommand(fmt.Sprintf("kubectl wait kafkatopic/%s --for=condition=Ready --timeout=480s --namespace %s", name, testNamespace))
 	assert.NoErrorf(t, err, "cannot execute command - %s", err)
+	t.Log("--- kafka topic added ---")
 }
 
 func addCluster(t *testing.T, data templateData) {
+	t.Log("--- adding kafka cluster ---")
 	KubectlApplyWithTemplate(t, data, "kafkaClusterTemplate", kafkaClusterTemplate)
 	_, err := ExecuteCommand(fmt.Sprintf("kubectl wait kafka/%s --for=condition=Ready --timeout=480s --namespace %s", kafkaName, testNamespace))
 	assert.NoErrorf(t, err, "cannot execute command - %s", err)
+	t.Log("--- kafka cluster added ---")
 }
 
 func getTemplateData() (templateData, []Template) {
