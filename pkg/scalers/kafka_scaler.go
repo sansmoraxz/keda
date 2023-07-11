@@ -257,8 +257,8 @@ func parseKafkaMetadata(config *ScalerConfig, logger logr.Logger) (kafkaMetadata
 	switch {
 	case config.TriggerMetadata["topicFromEnv"] != "":
 		meta.topic = strings.Split(config.ResolvedEnv[config.TriggerMetadata["topicFromEnv"]], ",")
-	case config.TriggerMetadata["topics"] != "":
-		meta.topic = strings.Split(config.TriggerMetadata["topics"], ",")
+	case config.TriggerMetadata["topic"] != "":
+		meta.topic = strings.Split(config.TriggerMetadata["topic"], ",")
 	default:
 		meta.topic = []string{}
 		logger.V(1).Info(fmt.Sprintf("consumer group %q has no topics specified, "+
@@ -413,7 +413,6 @@ func getKafkaClients(metadata kafkaMetadata) (*kafka.Client, *kafka.Transport, e
 	return &client, transport, nil
 }
 
-
 func (s *kafkaScaler) getTopicPartitions() (map[string][]int, error) {
 	metadata, err := s.client.Metadata(context.Background(), &kafka.MetadataRequest{
 		Addr: s.client.Addr,
@@ -422,7 +421,7 @@ func (s *kafkaScaler) getTopicPartitions() (map[string][]int, error) {
 		return nil, fmt.Errorf("error listing topics: %w", err)
 	}
 	s.logger.V(4).Info(fmt.Sprintf("Listed topics %v", metadata.Topics))
-	
+
 	if len(s.metadata.topic) == 0 {
 		// in case of empty topic name, we will get all topics that the consumer group is subscribed to
 		describeGrpReq := &kafka.DescribeGroupsRequest{
@@ -458,7 +457,7 @@ func (s *kafkaScaler) getTopicPartitions() (map[string][]int, error) {
 		for _, topic := range metadata.Topics {
 			partitions := make([]int, 0)
 			if kedautil.Contains(s.metadata.topic, topic.Name) {
-			for _, partition := range topic.Partitions {
+				for _, partition := range topic.Partitions {
 					if (len(s.metadata.partitionLimitation) == 0) ||
 						(len(s.metadata.partitionLimitation) > 0 && kedautil.Contains(s.metadata.partitionLimitation, int32(partition.ID))) {
 						partitions = append(partitions, partition.ID)
@@ -470,7 +469,6 @@ func (s *kafkaScaler) getTopicPartitions() (map[string][]int, error) {
 		return result, nil
 	}
 }
-
 
 func (s *kafkaScaler) getConsumerOffsets(topicPartitions map[string][]int) (map[string]map[int]int64, error) {
 	response, err := s.client.OffsetFetch(
