@@ -350,7 +350,9 @@ func TestScaler(t *testing.T) {
 	kc := GetKubernetesClient(t)
 	data, templates := getTemplateData()
 	CreateKubernetesResources(t, kc, testNamespace, data, templates)
+	defer DeleteKubernetesResources(t, testNamespace, data, templates)
 	installKafkaOperator(t)
+	defer uninstallKafkaOperator(t)
 	addCluster(t, data)
 	addTopic(t, data, topic1, topicPartitions)
 	addTopic(t, data, topic2, topicPartitions)
@@ -365,10 +367,6 @@ func TestScaler(t *testing.T) {
 	testZeroOnInvalidOffset(t, kc, data)
 	testOneOnInvalidOffset(t, kc, data)
 	testPersistentLag(t, kc, data)
-
-	// cleanup
-	uninstallKafkaOperator(t)
-	DeleteKubernetesResources(t, testNamespace, data, templates)
 }
 
 func testEarliestPolicy(t *testing.T, kc *kubernetes.Clientset, data templateData) {
