@@ -195,6 +195,7 @@ spec:
   triggers:
   - type: kafka
     metadata:
+	  topic: {{.Topic1Name}},{{.Topic2Name}}
       bootstrapServers: {{.BootstrapServer}}
       consumerGroup: multiTopic
       lagThreshold: '1'
