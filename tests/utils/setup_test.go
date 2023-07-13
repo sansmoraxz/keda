@@ -237,10 +237,16 @@ func TestSetUpStrimzi(t *testing.T) {
 	assert.NoErrorf(t, err, "cannot execute command - %s", err)
 	_, err = ExecuteCommand("helm repo update")
 	assert.NoErrorf(t, err, "cannot execute command - %s", err)
-	_, err = ExecuteCommand(fmt.Sprintf(`helm upgrade --install --namespace %s --wait %s strimzi/strimzi-kafka-operator --version %s`,
+
+	KubeClient = GetKubernetesClient(t)
+
+	CreateNamespace(t, KubeClient, StrimziNamespace)
+
+	_, err = ExecuteCommand(fmt.Sprintf(`helm upgrade --install --namespace %s --wait %s strimzi/strimzi-kafka-operator --version %s --set watchAnyNamespace=true`,
 		StrimziNamespace,
 		StrimziChartName,
 		StrimziVersion))
 	assert.NoErrorf(t, err, "cannot execute command - %s", err)
+
 	t.Log("--- kafka operator installed ---")
 }

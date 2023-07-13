@@ -94,5 +94,9 @@ func TestRemoveStrimzi(t *testing.T) {
 	_, err := ExecuteCommand(fmt.Sprintf(`helm uninstall --namespace %s %s`,
 		StrimziNamespace,
 		StrimziChartName))
-	assert.NoErrorf(t, err, "cannot execute command - %s", err)
+	require.NoErrorf(t, err, "cannot uninstall strimzi - %s", err)
+
+	KubeClient = GetKubernetesClient(t)
+
+	DeleteNamespace(t, StrimziNamespace)
 }

@@ -554,27 +554,6 @@ func testPersistentLag(t *testing.T, kc *kubernetes.Clientset, data templateData
 	KubectlDeleteWithTemplate(t, data, "persistentLagScaledObjectTemplate", persistentLagScaledObjectTemplate)
 }
 
-func installKafkaOperator(t *testing.T) {
-	t.Log("--- installing kafka operator ---")
-	_, err := ExecuteCommand("helm repo add strimzi https://strimzi.io/charts/")
-	assert.NoErrorf(t, err, "cannot execute command - %s", err)
-	_, err = ExecuteCommand("helm repo update")
-	assert.NoErrorf(t, err, "cannot execute command - %s", err)
-	_, err = ExecuteCommand(fmt.Sprintf(`helm upgrade --install --namespace %s --wait %s strimzi/strimzi-kafka-operator --version %s`,
-		testNamespace,
-		testName,
-		strimziOperatorVersion))
-	assert.NoErrorf(t, err, "cannot execute command - %s", err)
-	t.Log("--- kafka operator installed ---")
-}
-
-func uninstallKafkaOperator(t *testing.T) {
-	_, err := ExecuteCommand(fmt.Sprintf(`helm uninstall --namespace %s %s`,
-		testNamespace,
-		testName))
-	assert.NoErrorf(t, err, "cannot execute command - %s", err)
-}
-
 func addTopic(t *testing.T, data templateData, name string, partitions int) {
 	t.Log("--- adding kafka topic" + name + " and partitions " + strconv.Itoa(partitions) + " ---")
 	data.KafkaTopicName = name
