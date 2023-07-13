@@ -29,7 +29,6 @@ var (
 	kafkaClientName              = fmt.Sprintf("%s-client", testName)
 	scaledObjectName             = fmt.Sprintf("%s-so", testName)
 	bootstrapServer              = fmt.Sprintf("%s-kafka-bootstrap.%s:9092", kafkaName, testNamespace)
-	strimziOperatorVersion       = "0.35.0"
 	topic1                       = "kafka-topic"
 	topic2                       = "kafka-topic2"
 	zeroInvalidOffsetTopic       = "kafka-topic-zero-invalid-offset"
@@ -350,8 +349,6 @@ func TestScaler(t *testing.T) {
 	data, templates := getTemplateData()
 	CreateKubernetesResources(t, kc, testNamespace, data, templates)
 	defer DeleteKubernetesResources(t, testNamespace, data, templates)
-	installKafkaOperator(t)
-	defer uninstallKafkaOperator(t)
 	addCluster(t, data)
 	addTopic(t, data, topic1, topicPartitions)
 	addTopic(t, data, topic2, topicPartitions)
