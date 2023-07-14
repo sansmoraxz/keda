@@ -8,10 +8,12 @@ import (
 	"strconv"
 	"strings"
 
+	sigv4 "github.com/aws/aws-sdk-go/aws/signer/v4"
 	"github.com/go-logr/logr"
 	kedautil "github.com/kedacore/keda/v2/pkg/util"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl"
+	"github.com/segmentio/kafka-go/sasl/aws_msk_iam"
 	"github.com/segmentio/kafka-go/sasl/plain"
 	"github.com/segmentio/kafka-go/sasl/scram"
 	v2 "k8s.io/api/autoscaling/v2"
@@ -22,7 +24,6 @@ type kafkaXScaler struct {
 	metricType      v2.MetricTargetType
 	metadata        kafkaXMetadata
 	client          *kafka.Client
-	transport       *kafka.Transport
 	logger          logr.Logger
 	previousOffsets map[string]map[int]int64
 }
@@ -47,6 +48,11 @@ type kafkaXMetadata struct {
 	username string
 	password string
 
+	// MSK
+	awsRegion        string
+	awsEndpoint      string
+	awsAuthorization awsAuthorizationMetadata
+
 
 	// TLS
 	enableTLS   bool
@@ -57,6 +63,10 @@ type kafkaXMetadata struct {
 
 	scalerIndex int
 }
+
+const (
+	KafkaSASLTypeMskIam = "aws_msk_iam"
+)
 
 // NewKafkaXScaler creates a new KafkaXScaler
 func NewKafkaXScaler(config *ScalerConfig) (Scaler, error) {
@@ -72,7 +82,7 @@ func NewKafkaXScaler(config *ScalerConfig) (Scaler, error) {
 		return nil, fmt.Errorf("error parsing kafka metadata: %w", err)
 	}
 
-	client, transport, err := getKafkaXClients(kafkaMetadata)
+	client, err := getKafkaXClient(kafkaMetadata, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +91,6 @@ func NewKafkaXScaler(config *ScalerConfig) (Scaler, error) {
 
 	return &kafkaXScaler{
 		client:          client,
-		transport:       transport,
 		metricType:      metricType,
 		metadata:        kafkaMetadata,
 		logger:          logger,
@@ -109,7 +118,24 @@ func parseKafkaXAuthParams(config *ScalerConfig, meta *kafkaXMetadata) error {
 		saslAuthType = strings.TrimSpace(saslAuthType)
 		mode := kafkaSaslType(saslAuthType)
 
-		if mode == KafkaSASLTypePlaintext || mode == KafkaSASLTypeSCRAMSHA256 || mode == KafkaSASLTypeSCRAMSHA512 || mode == KafkaSASLTypeOAuthbearer {
+		if mode == KafkaSASLTypeMskIam {
+			if val, ok := config.TriggerMetadata["awsRegion"]; ok && val != "" {
+				meta.awsRegion = val
+			} else {
+				return fmt.Errorf("no awsRegion given")
+			}
+
+			if val, ok := config.TriggerMetadata["awsEndpoint"]; ok {
+				meta.awsEndpoint = val
+			}
+
+			auth, err := getAwsAuthorization(config.AuthParams, config.TriggerMetadata, config.ResolvedEnv)
+			if err != nil {
+				return err
+			}
+			meta.awsAuthorization = auth
+			meta.saslType = mode
+		} else if mode == KafkaSASLTypePlaintext || mode == KafkaSASLTypeSCRAMSHA256 || mode == KafkaSASLTypeSCRAMSHA512 {
 			if config.AuthParams["username"] == "" {
 				return errors.New("no username given")
 			}
@@ -120,13 +146,12 @@ func parseKafkaXAuthParams(config *ScalerConfig, meta *kafkaXMetadata) error {
 			}
 			meta.password = strings.TrimSpace(config.AuthParams["password"])
 			meta.saslType = mode
-
-			if mode == KafkaSASLTypeOAuthbearer {
-				return errors.New("OAuthbearer is not supported")
-			}
+		} else if mode == KafkaSASLTypeOAuthbearer {
+			// TODO: implement
+			return fmt.Errorf("SASL/OAUTHBEARER is not implemented yet")
 		} else {
 			return fmt.Errorf("err SASL mode %s given", mode)
-		}
+		} 
 	}
 
 	meta.enableTLS = false
@@ -298,23 +323,17 @@ func parseKafkaXMetadata(config *ScalerConfig, logger logr.Logger) (kafkaXMetada
 	return meta, nil
 }
 
-func getKafkaXClients(metadata kafkaXMetadata) (*kafka.Client, *kafka.Transport, error) {
+func getKafkaXClient(metadata kafkaXMetadata, logger logr.Logger) (*kafka.Client, error) {
 
 	var saslMechanism sasl.Mechanism = nil
 	var tlsConfig *tls.Config = nil
 	var err error
 
-	if metadata.saslType != KafkaSASLTypeNone {
-		saslMechanism = plain.Mechanism{
-			Username: metadata.username,
-			Password: metadata.password,
-		}
-	}
-
+	logger.V(4).Info(fmt.Sprintf("Kafka SASL type %s", metadata.saslType))
 	if metadata.enableTLS {
 		tlsConfig, err = kedautil.NewTLSConfigWithPassword(metadata.cert, metadata.key, metadata.keyPassword, metadata.ca, false)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 
@@ -323,25 +342,32 @@ func getKafkaXClients(metadata kafkaXMetadata) (*kafka.Client, *kafka.Transport,
 			Username: metadata.username,
 			Password: metadata.password,
 		}
-	}
-
-	if metadata.saslType == KafkaSASLTypeSCRAMSHA256 {
+	} else if metadata.saslType == KafkaSASLTypeSCRAMSHA256 {
 		saslMechanism, err = scram.Mechanism(scram.SHA256, metadata.username, metadata.password)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-	}
-
-	if metadata.saslType == KafkaSASLTypeSCRAMSHA512 {
+	} else if metadata.saslType == KafkaSASLTypeSCRAMSHA512 {
 		saslMechanism, err = scram.Mechanism(scram.SHA512, metadata.username, metadata.password)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-	}
-
-	if metadata.saslType == KafkaSASLTypeOAuthbearer {
+	} else if metadata.saslType == KafkaSASLTypeOAuthbearer {
 		// TODO: implement
-		return nil, nil, fmt.Errorf("SASL/OAUTHBEARER is not implemented yet")
+		return nil, fmt.Errorf("SASL/OAUTHBEARER is not implemented yet")
+	} else if metadata.saslType == KafkaSASLTypeMskIam {
+		// for MSK TLS is required
+		if tlsConfig == nil {
+			return nil, fmt.Errorf("TLS is required for MSK")
+		}
+		_, config := getAwsConfig(metadata.awsRegion,
+			metadata.awsEndpoint,
+			metadata.awsAuthorization)
+		
+		saslMechanism = &aws_msk_iam.Mechanism{
+			Signer:   sigv4.NewSigner(config.Credentials),
+			Region:   metadata.awsRegion,
+		}
 	}
 
 	transport := &kafka.Transport{
@@ -353,10 +379,10 @@ func getKafkaXClients(metadata kafkaXMetadata) (*kafka.Client, *kafka.Transport,
 		Transport: transport,
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("error creating kafka client: %w", err)
+		return nil, fmt.Errorf("error creating kafka client: %w", err)
 	}
 
-	return &client, transport, nil
+	return &client, nil
 }
 
 func (s *kafkaXScaler) getTopicPartitions() (map[string][]int, error) {
@@ -364,7 +390,8 @@ func (s *kafkaXScaler) getTopicPartitions() (map[string][]int, error) {
 		Addr: s.client.Addr,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error listing topics: %w", err)
+		transport := s.client.Transport.(*kafka.Transport)
+		return nil, fmt.Errorf("error listing topics with TLS %#v and SASL %#v: %w", transport.TLS, transport.SASL, err)
 	}
 	s.logger.V(4).Info(fmt.Sprintf("Listed topics %v", metadata.Topics))
 
@@ -494,8 +521,8 @@ func (s *kafkaXScaler) getLagForPartition(topic string, partitionID int, consume
 		}
 	}
 
-	s.logger.V(1).Info(fmt.Sprintf("Consumer offset for topic %s in group %s and partition %d is %d", topic, s.metadata.group, partitionID, consumerOffset))
-	s.logger.V(1).Info(fmt.Sprintf("Producer offset for topic %s in group %s and partition %d is %d", topic, s.metadata.group, partitionID, producerOffset))
+	s.logger.V(4).Info(fmt.Sprintf("Consumer offset for topic %s in group %s and partition %d is %d", topic, s.metadata.group, partitionID, consumerOffset))
+	s.logger.V(4).Info(fmt.Sprintf("Producer offset for topic %s in group %s and partition %d is %d", topic, s.metadata.group, partitionID, producerOffset))
 
 	return producerOffset - consumerOffset, producerOffset - consumerOffset, nil
 }
@@ -505,8 +532,9 @@ func (s *kafkaXScaler) Close(context.Context) error {
 	if s.client == nil {
 		return nil
 	}
-	if s.transport != nil {
-		s.transport.CloseIdleConnections()
+	transport := s.client.Transport.(*kafka.Transport)
+	if transport != nil {
+		transport.CloseIdleConnections()
 	}
 	//s.client = nil
 	//s.transport = nil
@@ -592,10 +620,10 @@ func (s *kafkaXScaler) getTotalLag() (int64, int64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	s.logger.V(1).Info(fmt.Sprintf("Kafka scaler: Topic partitions %v", topicPartitions))
+	s.logger.V(4).Info(fmt.Sprintf("Kafka scaler: Topic partitions %v", topicPartitions))
 
 	consumerOffsets, producerOffsets, err := s.getConsumerAndProducerOffsets(topicPartitions)
-	s.logger.V(1).Info(fmt.Sprintf("Kafka scaler: Consumer offsets %v, producer offsets %v", consumerOffsets, producerOffsets))
+	s.logger.V(4).Info(fmt.Sprintf("Kafka scaler: Consumer offsets %v, producer offsets %v", consumerOffsets, producerOffsets))
 	if err != nil {
 		return 0, 0, err
 	}

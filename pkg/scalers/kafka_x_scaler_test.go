@@ -363,7 +363,7 @@ func TestKafkaXGetMetricSpecForScaling(t *testing.T) {
 		if err != nil {
 			t.Fatal("Could not parse metadata:", err)
 		}
-		mockKafkaScaler := kafkaXScaler{"", meta, nil, nil, logr.Discard(), make(map[string]map[int]int64)}
+		mockKafkaScaler := kafkaXScaler{"", meta, nil, logr.Discard(), make(map[string]map[int]int64)}
 
 		metricSpec := mockKafkaScaler.GetMetricSpecForScaling(context.Background())
 		metricName := metricSpec[0].External.Metric.Name
