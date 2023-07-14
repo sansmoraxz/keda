@@ -19,7 +19,7 @@ import (
 var _ = godotenv.Load("../../.env")
 
 const (
-	testName = "kafka-test"
+	testName = "kafka-x-test"
 )
 
 var (
@@ -195,6 +195,7 @@ spec:
   triggers:
   - type: kafka-x
     metadata:
+      topic: {{.TopicName}}
       bootstrapServers: {{.BootstrapServer}}
       consumerGroup: multiTopic
       lagThreshold: '1'
@@ -437,6 +438,7 @@ func testMultiTopic(t *testing.T, kc *kubernetes.Clientset, data templateData) {
 	t.Log("--- testing multi topic: scale out ---")
 	commitPartition(t, topic1, "multiTopic")
 	commitPartition(t, topic2, "multiTopic")
+	data.TopicName = fmt.Sprintf("%s,%s", topic1, topic2)
 	KubectlApplyWithTemplate(t, data, "multiDeploymentTemplate", multiDeploymentTemplate)
 	defer KubectlDeleteWithTemplate(t, data, "multiDeploymentTemplate", multiDeploymentTemplate)
 	KubectlApplyWithTemplate(t, data, "multiScaledObjectTemplate", multiScaledObjectTemplate)
