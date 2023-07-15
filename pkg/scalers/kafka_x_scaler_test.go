@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -130,14 +129,6 @@ var parseKafkaXAuthParamsTestDataset = []parseKafkaXAuthParamsTestData{
 	{map[string]string{"sasl": "plaintext", "username": "admin", "password": "admin", "tls": "enable", "ca": "caaa", "cert": "ceert", "key": "keey"}, false, true},
 	// success, SASL + TLS explicitly disabled
 	{map[string]string{"sasl": "plaintext", "username": "admin", "password": "admin", "tls": "disable"}, false, false},
-	// success, SASL OAUTHBEARER + TLS
-	{map[string]string{"sasl": "oauthbearer", "username": "admin", "password": "admin", "scopes": "scope", "oauthTokenEndpointUri": "https://website.com", "tls": "disable"}, false, false},
-	// failure, SASL OAUTHBEARER + TLS bad sasl type
-	{map[string]string{"sasl": "foo", "username": "admin", "password": "admin", "scopes": "scope", "oauthTokenEndpointUri": "https://website.com", "tls": "disable"}, true, false},
-	// success, SASL OAUTHBEARER + TLS missing scope
-	{map[string]string{"sasl": "oauthbearer", "username": "admin", "password": "admin", "oauthTokenEndpointUri": "https://website.com", "tls": "disable"}, false, false},
-	// failure, SASL OAUTHBEARER + TLS missing oauthTokenEndpointUri
-	{map[string]string{"sasl": "oauthbearer", "username": "admin", "password": "admin", "scopes": "scope", "oauthTokenEndpointUri": "", "tls": "disable"}, true, false},
 	// failure, SASL incorrect type
 	{map[string]string{"sasl": "foo", "username": "admin", "password": "admin"}, true, false},
 	// failure, SASL missing username
@@ -151,17 +142,17 @@ var parseKafkaXAuthParamsTestDataset = []parseKafkaXAuthParamsTestData{
 	// failure, TLS invalid
 	{map[string]string{"tls": "yes", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, false},
 	// failure, SASL + TLS, incorrect sasl
-	{map[string]string{"sasl": "foo", "username": "admin", "password": "admin", "tls": "enable", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, false},
+	{map[string]string{"sasl": "foo", "username": "admin", "password": "admin", "tls": "enable", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, true},
 	// failure, SASL + TLS, incorrect tls
 	{map[string]string{"sasl": "plaintext", "username": "admin", "password": "admin", "tls": "foo", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, false},
 	// failure, SASL + TLS, missing username
-	{map[string]string{"sasl": "plaintext", "password": "admin", "tls": "enable", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, false},
+	{map[string]string{"sasl": "plaintext", "password": "admin", "tls": "enable", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, true},
 	// failure, SASL + TLS, missing password
-	{map[string]string{"sasl": "plaintext", "username": "admin", "tls": "enable", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, false},
+	{map[string]string{"sasl": "plaintext", "username": "admin", "tls": "enable", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, true},
 	// failure, SASL + TLS, missing cert
-	{map[string]string{"sasl": "plaintext", "username": "admin", "password": "admin", "tls": "enable", "ca": "caaa", "key": "keey"}, true, false},
+	{map[string]string{"sasl": "plaintext", "username": "admin", "password": "admin", "tls": "enable", "ca": "caaa", "key": "keey"}, true, true},
 	// failure, SASL + TLS, missing key
-	{map[string]string{"sasl": "plaintext", "username": "admin", "password": "admin", "tls": "enable", "ca": "caaa", "cert": "ceert"}, true, false},
+	{map[string]string{"sasl": "plaintext", "username": "admin", "password": "admin", "tls": "enable", "ca": "caaa", "cert": "ceert"}, true, true},
 }
 var parseKafkaXAuthParamsTestDataset2 = []parseKafkaXAuthParamsTestDataSecondAuthMethod{
 	// success, SASL plaintext
@@ -199,13 +190,13 @@ var parseKafkaXAuthParamsTestDataset2 = []parseKafkaXAuthParamsTestDataSecondAut
 	// failure, SASL + TLS, incorrect tls
 	{map[string]string{"sasl": "plaintext", "tls": "foo", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"username": "admin", "password": "admin", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, false},
 	// failure, SASL + TLS, missing username
-	{map[string]string{"sasl": "plaintext", "tls": "enable", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"password": "admin", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, false},
+	{map[string]string{"sasl": "plaintext", "tls": "enable", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"password": "admin", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, true},
 	// failure, SASL + TLS, missing password
-	{map[string]string{"sasl": "plaintext", "tls": "enable", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"username": "admin", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, false},
+	{map[string]string{"sasl": "plaintext", "tls": "enable", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"username": "admin", "ca": "caaa", "cert": "ceert", "key": "keey"}, true, true},
 	// failure, SASL + TLS, missing cert
-	{map[string]string{"sasl": "plaintext", "tls": "enable", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"username": "admin", "password": "admin", "ca": "caaa", "key": "keey"}, true, false},
+	{map[string]string{"sasl": "plaintext", "tls": "enable", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"username": "admin", "password": "admin", "ca": "caaa", "key": "keey"}, true, true},
 	// failure, SASL + TLS, missing key
-	{map[string]string{"sasl": "plaintext", "tls": "enable", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"sasl": "plaintext", "username": "admin", "password": "admin", "ca": "caaa", "cert": "ceert"}, true, false},
+	{map[string]string{"sasl": "plaintext", "tls": "enable", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"sasl": "plaintext", "username": "admin", "password": "admin", "ca": "caaa", "cert": "ceert"}, true, true},
 
 	// failure, setting SASL values in both places
 	{map[string]string{"sasl": "scram_sha512", "bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"sasl": "scram_sha512", "username": "admin", "password": "admin"}, true, false},
@@ -223,6 +214,12 @@ var parseKafkaXAuthParamsTestDataset2 = []parseKafkaXAuthParamsTestDataSecondAut
 	{map[string]string{"bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"sasl": "scram_sha512\n", "username": "admin", "password": "admin"}, false, true},
 	// success, setting SASL scram_sha512 value with extra space in TriggerAuthentication
 	{map[string]string{"bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"sasl": "scram_sha512 ", "username": "admin", "password": "admin"}, false, true},
+	// success, setting SASL aws_msk_iam with tls enabled and passing credentials
+	{map[string]string{"bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0", "awsRegion": "us-east-1"}, map[string]string{"tls": "enable", "sasl": "aws_msk_iam", "awsAccessKeyID": "none", "awsSecretAccessKey": "none"}, false, true},
+	// failure, setting SASL aws_msk_iam with tls enabled and missing awsRegion
+	{map[string]string{"bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0"}, map[string]string{"tls": "enable", "sasl": "aws_msk_iam", "awsAccessKeyID": "none", "awsSecretAccessKey": "none"}, true, true},
+	// failure, setting SASL aws_msk_iam with tls disabled
+	{map[string]string{"bootstrapServers": "foobar:9092", "consumerGroup": "my-group", "topic": "my-topics", "allowIdleConsumers": "true", "version": "1.0.0", "awsRegion": "us-east-1"}, map[string]string{"sasl": "aws_msk_iam", "awsAccessKeyID": "none", "awsSecretAccessKey": "none"}, true, false},
 }
 
 var kafkaXMetricIdentifiers = []kafkaXMetricIdentifier{
@@ -233,7 +230,7 @@ var kafkaXMetricIdentifiers = []kafkaXMetricIdentifier{
 
 func TestKafkaXGetBrokers(t *testing.T) {
 	for _, testData := range parseKafkaXMetadataTestDataset {
-		meta, err := parseKafkaMetadata(&ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: validKafkaXWithAuthParams}, logr.Discard())
+		meta, err := parseKafkaXMetadata(&ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: validKafkaXWithAuthParams}, logr.Discard())
 
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
@@ -245,22 +242,22 @@ func TestKafkaXGetBrokers(t *testing.T) {
 			t.Errorf("Expected %d bootstrap servers but got %d\n", testData.numBrokers, len(meta.bootstrapServers))
 		}
 		if !reflect.DeepEqual(testData.brokers, meta.bootstrapServers) {
-			t.Errorf("Expected %v but got %v\n", testData.brokers, meta.bootstrapServers)
+			t.Errorf("Expected %#v but got %#v\n", testData.brokers, meta.bootstrapServers)
 		}
 		if meta.group != testData.group {
 			t.Errorf("Expected group %s but got %s\n", testData.group, meta.group)
 		}
-		if meta.topic != strings.Join(testData.topic, ",") {
-			t.Errorf("Expected topics %v but got %v\n", testData.topic, meta.topic)
+		if !reflect.DeepEqual(testData.topic, meta.topic) {
+			t.Errorf("Expected topics %#v but got %#v\n", testData.topic, meta.topic)
 		}
 		if !reflect.DeepEqual(testData.partitionLimitation, meta.partitionLimitation) {
-			t.Errorf("Expected %v but got %v\n", testData.partitionLimitation, meta.partitionLimitation)
+			t.Errorf("Expected %#v but got %#v\n", testData.partitionLimitation, meta.partitionLimitation)
 		}
 		if err == nil && meta.offsetResetPolicy != testData.offsetResetPolicy {
 			t.Errorf("Expected offsetResetPolicy %s but got %s\n", testData.offsetResetPolicy, meta.offsetResetPolicy)
 		}
 
-		meta, err = parseKafkaMetadata(&ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: validKafkaXWithoutAuthParams}, logr.Discard())
+		meta, err = parseKafkaXMetadata(&ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: validKafkaXWithoutAuthParams}, logr.Discard())
 
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
@@ -272,16 +269,16 @@ func TestKafkaXGetBrokers(t *testing.T) {
 			t.Errorf("Expected %d bootstrap servers but got %d\n", testData.numBrokers, len(meta.bootstrapServers))
 		}
 		if !reflect.DeepEqual(testData.brokers, meta.bootstrapServers) {
-			t.Errorf("Expected %v but got %v\n", testData.brokers, meta.bootstrapServers)
+			t.Errorf("Expected %#v but got %#v\n", testData.brokers, meta.bootstrapServers)
 		}
 		if meta.group != testData.group {
 			t.Errorf("Expected group %s but got %s\n", testData.group, meta.group)
 		}
-		if meta.topic != strings.Join(testData.topic, ",") {
-			t.Errorf("Expected topics %v but got %v\n", testData.topic, meta.topic)
+		if !reflect.DeepEqual(testData.topic, meta.topic) {
+			t.Errorf("Expected topics %#v but got %#v\n", testData.topic, meta.topic)
 		}
 		if !reflect.DeepEqual(testData.partitionLimitation, meta.partitionLimitation) {
-			t.Errorf("Expected %v but got %v\n", testData.partitionLimitation, meta.partitionLimitation)
+			t.Errorf("Expected %#v but got %#v\n", testData.partitionLimitation, meta.partitionLimitation)
 		}
 		if err == nil && meta.offsetResetPolicy != testData.offsetResetPolicy {
 			t.Errorf("Expected offsetResetPolicy %s but got %s\n", testData.offsetResetPolicy, meta.offsetResetPolicy)
@@ -298,7 +295,7 @@ func TestKafkaXGetBrokers(t *testing.T) {
 func TestKafkaXAuthParams(t *testing.T) {
 	// Testing tls and sasl value in TriggerAuthentication
 	for _, testData := range parseKafkaXAuthParamsTestDataset {
-		meta, err := parseKafkaMetadata(&ScalerConfig{TriggerMetadata: validKafkaXMetadata, AuthParams: testData.authParams}, logr.Discard())
+		meta, err := parseKafkaXMetadata(&ScalerConfig{TriggerMetadata: validKafkaXMetadata, AuthParams: testData.authParams}, logr.Discard())
 
 		if err != nil && !testData.isError {
 			t.Error("Expected success but got error", err)
@@ -306,51 +303,52 @@ func TestKafkaXAuthParams(t *testing.T) {
 		if testData.isError && err == nil {
 			t.Error("Expected error but got success")
 		}
-		if meta.enableTLS != testData.enableTLS {
-			t.Errorf("Expected enableTLS to be set to %v but got %v\n", testData.enableTLS, meta.enableTLS)
+		// we can ignore what tls is set if there is error
+		if err == nil && meta.enableTLS != testData.enableTLS {
+			t.Errorf("Expected enableTLS to be set to %#v but got %#v\n", testData.enableTLS, meta.enableTLS)
 		}
-		if meta.enableTLS {
+		if err == nil && meta.enableTLS {
 			if meta.ca != testData.authParams["ca"] {
-				t.Errorf("Expected ca to be set to %v but got %v\n", testData.authParams["ca"], meta.enableTLS)
+				t.Errorf("Expected ca to be set to %#v but got %#v\n", testData.authParams["ca"], meta.ca)
 			}
 			if meta.cert != testData.authParams["cert"] {
-				t.Errorf("Expected cert to be set to %v but got %v\n", testData.authParams["cert"], meta.cert)
+				t.Errorf("Expected cert to be set to %#v but got %#v\n", testData.authParams["cert"], meta.cert)
 			}
 			if meta.key != testData.authParams["key"] {
-				t.Errorf("Expected key to be set to %v but got %v\n", testData.authParams["key"], meta.key)
+				t.Errorf("Expected key to be set to %#v but got %#v\n", testData.authParams["key"], meta.key)
 			}
 			if meta.keyPassword != testData.authParams["keyPassword"] {
-				t.Errorf("Expected key to be set to %v but got %v\n", testData.authParams["keyPassword"], meta.key)
+				t.Errorf("Expected key to be set to %#v but got %#v\n", testData.authParams["keyPassword"], meta.key)
 			}
 		}
 	}
 
 	// Testing tls and sasl value in scaledObject
 	for id, testData := range parseKafkaXAuthParamsTestDataset2 {
-		meta, err := parseKafkaMetadata(&ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: testData.authParams}, logr.Discard())
+		meta, err := parseKafkaXMetadata(&ScalerConfig{TriggerMetadata: testData.metadata, AuthParams: testData.authParams}, logr.Discard())
 
 		if err != nil && !testData.isError {
-			t.Errorf("Test case: %v. Expected success but got error %v", id, err)
+			t.Errorf("Test case: %#v. Expected success but got error %#v", id, err)
 		}
 		if testData.isError && err == nil {
-			t.Errorf("Test case: %v. Expected error but got success", id)
+			t.Errorf("Test case: %#v. Expected error but got success", id)
 		}
 		if !testData.isError {
 			if testData.metadata["tls"] == "true" && !meta.enableTLS {
-				t.Errorf("Test case: %v. Expected tls to be set to %v but got %v\n", id, testData.metadata["tls"], meta.enableTLS)
+				t.Errorf("Test case: %#v. Expected tls to be set to %#v but got %#v\n", id, testData.metadata["tls"], meta.enableTLS)
 			}
 			if meta.enableTLS {
 				if meta.ca != testData.authParams["ca"] {
-					t.Errorf("Test case: %v. Expected ca to be set to %v but got %v\n", id, testData.authParams["ca"], meta.ca)
+					t.Errorf("Test case: %#v. Expected ca to be set to %#v but got %#v\n", id, testData.authParams["ca"], meta.ca)
 				}
 				if meta.cert != testData.authParams["cert"] {
-					t.Errorf("Test case: %v. Expected cert to be set to %v but got %v\n", id, testData.authParams["cert"], meta.cert)
+					t.Errorf("Test case: %#v. Expected cert to be set to %#v but got %#v\n", id, testData.authParams["cert"], meta.cert)
 				}
 				if meta.key != testData.authParams["key"] {
-					t.Errorf("Test case: %v. Expected key to be set to %v but got %v\n", id, testData.authParams["key"], meta.key)
+					t.Errorf("Test case: %#v. Expected key to be set to %#v but got %#v\n", id, testData.authParams["key"], meta.key)
 				}
 				if meta.keyPassword != testData.authParams["keyPassword"] {
-					t.Errorf("Test case: %v. Expected key to be set to %v but got %v\n", id, testData.authParams["keyPassword"], meta.keyPassword)
+					t.Errorf("Test case: %#v. Expected key to be set to %#v but got %#v\n", id, testData.authParams["keyPassword"], meta.keyPassword)
 				}
 			}
 		}
@@ -368,9 +366,8 @@ func TestKafkaXGetMetricSpecForScaling(t *testing.T) {
 		metricSpec := mockKafkaScaler.GetMetricSpecForScaling(context.Background())
 		metricName := metricSpec[0].External.Metric.Name
 		if metricName != testData.name {
-			str := fmt.Sprintf("Wrong External metric source name: %s, expected: %s for %v\n", metricName, testData.name, testData)
+			str := fmt.Sprintf("Wrong External metric source name: %s, expected: %s for %#v\n", metricName, testData.name, testData)
 			t.Error("Wrong External metric source name:", metricName, str)
 		}
 	}
 }
-

@@ -99,61 +99,6 @@ func NewKafkaXScaler(config *ScalerConfig) (Scaler, error) {
 }
 
 func parseKafkaXAuthParams(config *ScalerConfig, meta *kafkaXMetadata) error {
-	meta.saslType = KafkaSASLTypeNone
-	var saslAuthType string
-	switch {
-	case config.TriggerMetadata["sasl"] != "":
-		saslAuthType = config.TriggerMetadata["sasl"]
-	default:
-		saslAuthType = ""
-	}
-	if val, ok := config.AuthParams["sasl"]; ok {
-		if saslAuthType != "" {
-			return errors.New("unable to set `sasl` in both ScaledObject and TriggerAuthentication together")
-		}
-		saslAuthType = val
-	}
-
-	if saslAuthType != "" {
-		saslAuthType = strings.TrimSpace(saslAuthType)
-		mode := kafkaSaslType(saslAuthType)
-
-		if mode == KafkaSASLTypeMskIam {
-			if val, ok := config.TriggerMetadata["awsRegion"]; ok && val != "" {
-				meta.awsRegion = val
-			} else {
-				return fmt.Errorf("no awsRegion given")
-			}
-
-			if val, ok := config.TriggerMetadata["awsEndpoint"]; ok {
-				meta.awsEndpoint = val
-			}
-
-			auth, err := getAwsAuthorization(config.AuthParams, config.TriggerMetadata, config.ResolvedEnv)
-			if err != nil {
-				return err
-			}
-			meta.awsAuthorization = auth
-			meta.saslType = mode
-		} else if mode == KafkaSASLTypePlaintext || mode == KafkaSASLTypeSCRAMSHA256 || mode == KafkaSASLTypeSCRAMSHA512 {
-			if config.AuthParams["username"] == "" {
-				return errors.New("no username given")
-			}
-			meta.username = strings.TrimSpace(config.AuthParams["username"])
-
-			if config.AuthParams["password"] == "" {
-				return errors.New("no password given")
-			}
-			meta.password = strings.TrimSpace(config.AuthParams["password"])
-			meta.saslType = mode
-		} else if mode == KafkaSASLTypeOAuthbearer {
-			// TODO: implement
-			return fmt.Errorf("SASL/OAUTHBEARER is not implemented yet")
-		} else {
-			return fmt.Errorf("err SASL mode %s given", mode)
-		} 
-	}
-
 	meta.enableTLS = false
 	enableTLS := false
 	if val, ok := config.TriggerMetadata["tls"]; ok {
@@ -200,6 +145,65 @@ func parseKafkaXAuthParams(config *ScalerConfig, meta *kafkaXMetadata) error {
 			meta.keyPassword = ""
 		}
 		meta.enableTLS = true
+	}
+
+	meta.saslType = KafkaSASLTypeNone
+	var saslAuthType string
+	switch {
+	case config.TriggerMetadata["sasl"] != "":
+		saslAuthType = config.TriggerMetadata["sasl"]
+	default:
+		saslAuthType = ""
+	}
+	if val, ok := config.AuthParams["sasl"]; ok {
+		if saslAuthType != "" {
+			return errors.New("unable to set `sasl` in both ScaledObject and TriggerAuthentication together")
+		}
+		saslAuthType = val
+	}
+
+	if saslAuthType != "" {
+		saslAuthType = strings.TrimSpace(saslAuthType)
+		mode := kafkaSaslType(saslAuthType)
+
+		if mode == KafkaSASLTypeMskIam {
+			if !meta.enableTLS {
+				return errors.New("TLS is required for MSK")
+			}
+			
+			if val, ok := config.TriggerMetadata["awsRegion"]; ok && val != "" {
+				meta.awsRegion = val
+			} else {
+				return fmt.Errorf("no awsRegion given")
+			}
+
+			if val, ok := config.TriggerMetadata["awsEndpoint"]; ok {
+				meta.awsEndpoint = val
+			}
+
+			auth, err := getAwsAuthorization(config.AuthParams, config.TriggerMetadata, config.ResolvedEnv)
+			if err != nil {
+				return err
+			}
+			meta.awsAuthorization = auth
+			meta.saslType = mode
+		} else if mode == KafkaSASLTypePlaintext || mode == KafkaSASLTypeSCRAMSHA256 || mode == KafkaSASLTypeSCRAMSHA512 {
+			if config.AuthParams["username"] == "" {
+				return errors.New("no username given")
+			}
+			meta.username = strings.TrimSpace(config.AuthParams["username"])
+
+			if config.AuthParams["password"] == "" {
+				return errors.New("no password given")
+			}
+			meta.password = strings.TrimSpace(config.AuthParams["password"])
+			meta.saslType = mode
+		} else if mode == KafkaSASLTypeOAuthbearer {
+			// TODO: implement
+			return fmt.Errorf("SASL/OAUTHBEARER is not implemented yet")
+		} else {
+			return fmt.Errorf("err SASL mode %s given", mode)
+		} 
 	}
 
 	return nil
@@ -356,10 +360,6 @@ func getKafkaXClient(metadata kafkaXMetadata, logger logr.Logger) (*kafka.Client
 		// TODO: implement
 		return nil, fmt.Errorf("SASL/OAUTHBEARER is not implemented yet")
 	} else if metadata.saslType == KafkaSASLTypeMskIam {
-		// for MSK TLS is required
-		if tlsConfig == nil {
-			return nil, fmt.Errorf("TLS is required for MSK")
-		}
 		_, config := getAwsConfig(metadata.awsRegion,
 			metadata.awsEndpoint,
 			metadata.awsAuthorization)
